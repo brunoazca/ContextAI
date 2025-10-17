@@ -8,6 +8,14 @@
 
 import Foundation
 import Combine
+
+// MARK: - Assistente Action Model
+struct AssistenteAction {
+    let id: String
+    let name: String
+    let description: String
+    let keywords: [String]
+}
 // MARK: - LLM Manager
 
 @MainActor
@@ -89,35 +97,45 @@ class LLMManager: ObservableObject {
     
     /// Processa texto reconhecido pelo OCR com contexto específico
     func processOCRText(_ recognizedText: String) async throws -> String {
-        print("🤖 LLMManager: Processando texto OCR com contexto histórico")
+        print("🤖 LLMManager: Processando texto OCR com Foundation Models")
         
-        // Salva o texto OCR no contexto
-        contextManager.addContext(recognizedText, source: "OCR", metadata: [
+        // Primeiro, analisa o texto OCR com Foundation Models para entender o que o usuário está fazendo
+        let activityAnalysis = try await analyzeOCRWithFoundationModels(recognizedText)
+        
+        // Salva a análise da atividade no contexto (não o texto bruto do OCR)
+        contextManager.addContext(activityAnalysis, source: "OCR Analysis", metadata: [
             "text_length": String(recognizedText.count),
-            "word_count": String(recognizedText.components(separatedBy: .whitespaces).count)
+            "word_count": String(recognizedText.components(separatedBy: .whitespaces).count),
+            "original_ocr": String(recognizedText.prefix(200)) // Mantém uma amostra do OCR original
         ])
         
         // Busca contexto histórico relevante
-        let historicalContext = contextManager.generateContextForLLM(currentContent: recognizedText)
+        let historicalContext = contextManager.generateContextForLLM(currentContent: activityAnalysis)
+        
+        let availableActionsContext = generateAvailableActionsContext()
         
         let prompt = """
-        Analise o seguinte texto extraído de uma captura de tela e forneça um resumo ou análise útil:
+        Com base na análise da atividade atual do usuário e no contexto histórico, forneça uma análise útil e sugestões práticas focadas em ações executáveis.
         
+        \(availableActionsContext)
+        
+        ATIVIDADE ATUAL DO USUÁRIO:
+        \(activityAnalysis)
+        
+        CONTEXTO HISTÓRICO:
         \(historicalContext)
         
-        Texto extraído:
-        \(recognizedText)
-        
-        Por favor, forneça:
-        1. Um resumo conciso do conteúdo
-        2. Principais pontos ou informações importantes
-        3. Sugestões ou insights relevantes
-        4. Relacionamento com o contexto histórico do usuário (se relevante)
-        
-        Responda em português brasileiro.
+        INSTRUÇÕES:
+        1. Analise a atividade atual do usuário
+        2. Identifique se alguma das ações disponíveis é relevante
+        3. Se relevante, sugira a ação específica com detalhes práticos
+        4. Se nenhuma ação for relevante, responda "Nenhuma ação disponível"
+        5. Seja específico sobre qual ação e como executá-la
+        6. Responda em português brasileiro
+        7. Máximo 3 frases
         """
         
-        print("🤖 LLMManager: Enviando prompt para análise com contexto histórico")
+        print("🤖 LLMManager: Enviando prompt para análise de atividade com contexto histórico")
         return try await processText(prompt)
     }
     
@@ -133,8 +151,12 @@ class LLMManager: ObservableObject {
         // Busca contexto histórico relevante
         let historicalContext = contextManager.generateContextForLLM(currentContent: text)
         
+        let availableActionsContext = generateAvailableActionsContext()
+        
         let fullPrompt = """
         \(customPrompt)
+        
+        \(availableActionsContext)
         
         \(historicalContext)
         
@@ -155,8 +177,12 @@ class LLMManager: ObservableObject {
         
         print("🤖 LLMManager: Contexto histórico encontrado: \(historicalContext.count) caracteres")
         
+        let availableActionsContext = generateAvailableActionsContext()
+        
         let fullPrompt = """
         \(customPrompt)
+        
+        \(availableActionsContext)
         
         \(historicalContext)
         
@@ -170,13 +196,17 @@ class LLMManager: ObservableObject {
     // MARK: - Action Suggestion (raw text)
     /// Gera uma sugestão de ação em TEXTO PURO priorizando contexto atual
     func generateSuggestionText(from recognizedText: String) async throws -> String {
-        print("🤖 LLMManager: Gerando sugestão priorizando contexto atual (análise a cada 15s)")
+        print("🤖 LLMManager: Gerando sugestão priorizando contexto atual (análise a cada 7s)")
         
-        // Indexa o texto OCR no contexto
-        contextManager.addContext(recognizedText, source: "OCR", metadata: [
+        // Primeiro, analisa o texto OCR com Foundation Models para entender o que o usuário está fazendo
+        let activityAnalysis = try await analyzeOCRWithFoundationModels(recognizedText)
+        
+        // Indexa a análise da atividade no contexto (não o texto bruto do OCR)
+        contextManager.addContext(activityAnalysis, source: "OCR Analysis", metadata: [
             "text_length": String(recognizedText.count),
             "for_suggestion": "true",
-            "timestamp": Date().timeIntervalSince1970.description
+            "timestamp": Date().timeIntervalSince1970.description,
+            "original_ocr": String(recognizedText.prefix(200)) // Mantém uma amostra do OCR original
         ])
         
         // Busca apenas as 2 entradas mais recentes (incluindo a atual)
@@ -196,16 +226,29 @@ class LLMManager: ObservableObject {
             contextString += "=== FIM DO CONTEXTO ATUAL ===\n\n"
         }
         
+        let availableActionsContext = generateAvailableActionsContext()
+        
         let prompt = """
-        Você é um assistente proativo. Com base APENAS no que o usuário está vendo AGORA (contexto atual), escreva UMA sugestão objetiva, curta e diretamente acionável do que você pode fazer para ajudar o usuário neste momento. IGNORE contexto antigo e foque no que está acontecendo agora. Responda APENAS com a sugestão em texto (sem JSON, sem prefixos, sem porcentagens).
+        Você é um assistente proativo com capacidades específicas. Com base na atividade atual do usuário, sugira APENAS ações que você pode realmente executar.
 
+        \(availableActionsContext)
+        
         \(contextString)
         
-        TEXTO ATUAL (O que está na tela AGORA):
-        \(recognizedText)
+        ATIVIDADE ATUAL (O que o usuário está fazendo AGORA):
+        \(activityAnalysis)
+        
+        INSTRUÇÕES:
+        - Analise a atividade atual do usuário
+        - Identifique se alguma das ações disponíveis é relevante
+        - Se relevante, sugira a ação específica com detalhes práticos
+        - Se nenhuma ação for relevante, responda "Nenhuma ação disponível"
+        - Seja específico sobre qual ação e como executá-la
+        - Responda em português brasileiro
+        - Máximo 2 frases
         """
         
-        print("🤖 LLMManager: Enviando prompt para sugestão com contexto atual")
+        print("🤖 LLMManager: Enviando prompt para sugestão com atividade atual")
         let suggestion = try await processText(prompt).trimmingCharacters(in: .whitespacesAndNewlines)
         
         print("🤖 LLMManager: Sugestão gerada: \(String(suggestion.prefix(100)))...")
@@ -216,5 +259,72 @@ class LLMManager: ObservableObject {
     /// Retorna o gerenciador de contexto para acesso externo
     var contextManagerInstance: ContextManager {
         return contextManager
+    }
+    
+    // MARK: - Available Actions
+    /// Lista de ações que o assistente pode executar
+    private let availableActions: [AssistenteAction] = [
+        AssistenteAction(
+            id: "send_email",
+            name: "Enviar Email",
+            description: "Enviar emails para contatos específicos",
+            keywords: ["email", "enviar", "mensagem", "contato", "comunicar"]
+        ),
+        AssistenteAction(
+            id: "schedule_meeting",
+            name: "Marcar Reunião",
+            description: "Agendar reuniões com pessoas ou grupos",
+            keywords: ["reunião", "agendar", "encontro", "meeting", "calendário"]
+        ),
+        AssistenteAction(
+            id: "schedule_activity",
+            name: "Agendar Atividade",
+            description: "Criar lembretes e agendar tarefas pessoais",
+            keywords: ["lembrete", "tarefa", "atividade", "agendar", "planner"]
+        ),
+        AssistenteAction(
+            id: "purchase_item",
+            name: "Comprar Item",
+            description: "Adicionar itens a listas de compras ou fazer compras online",
+            keywords: ["comprar", "shopping", "lista", "item", "produto", "loja"]
+        )
+    ]
+    
+    /// Gera contexto das ações disponíveis para o prompt
+    private func generateAvailableActionsContext() -> String {
+        var context = "=== AÇÕES DISPONÍVEIS ===\n"
+        context += "O assistente pode executar APENAS as seguintes ações:\n\n"
+        
+        for (index, action) in availableActions.enumerated() {
+            context += "\(index + 1). \(action.name)\n"
+            context += "   - \(action.description)\n"
+            context += "   - Palavras-chave: \(action.keywords.joined(separator: ", "))\n\n"
+        }
+        
+        context += "IMPORTANTE: Sugira APENAS ações desta lista. Se nenhuma ação for relevante, responda 'Nenhuma ação disponível'.\n"
+        context += "=== FIM DAS AÇÕES DISPONÍVEIS ===\n\n"
+        
+        return context
+    }
+    
+    /// Analisa texto OCR usando Foundation Models para entender o que o usuário está fazendo
+    func analyzeOCRWithFoundationModels(_ ocrText: String) async throws -> String {
+        print("🤖 LLMManager: Analisando OCR com Foundation Models")
+        
+        let prompt = """
+        Analise o seguinte texto extraído de uma captura de tela e forneça um resumo conciso (máximo 2-3 frases) do que o usuário está fazendo atualmente. Seja específico sobre a atividade, aplicativo ou tarefa sendo realizada.
+
+        Texto da tela:
+        \(ocrText)
+
+        Resumo da atividade:
+        """
+        
+        print("🤖 LLMManager: Enviando texto OCR para análise com Foundation Models")
+        let analysis = try await processText(prompt).trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        print("🤖 LLMManager: Análise OCR concluída: \(String(analysis.prefix(100)))...")
+        
+        return analysis
     }
 }
